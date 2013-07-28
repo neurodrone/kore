@@ -32,24 +32,22 @@ static u_int32_t		event_count = 0;
 void
 kore_platform_init(void)
 {
-    cpu_count = 0;
+#ifndef __MACH__
+	cpu_count = 0;
+#else
+	long	n;
+	size_t	len = sizeof(n);
+	int	mib[] = { CTL_HW, HW_AVAILCPU };
 
-#ifdef __MACH__
-    long n;
-    int mib[] = { CTL_HW, HW_AVAILCPU };
-    size_t len = sizeof(n);
+	 sysctl(mib, 2, &n, &len, NULL, 0);
+	if (n < 1) {
+		mib[1] = HW_NCPU;
+		sysctl(mib, 2, &n, &len, NULL, 0);
+	}
 
-    sysctl(mib, 2, &n, &len, NULL, 0);
-    if (n < 1) {
-        mib[1] = HW_NCPU;
-        sysctl(mib, 2, &n, &len, NULL, 0);
-    }
-
-    if (n >= 1) {
-        cpu_count = (u_int16_t)n;
-    }
-#endif /* __MACH__ */
-
+	if (n >= 1)
+		cpu_count = (u_int16_t)n;
+#endif /* !__MACH__ */
 }
 
 void
