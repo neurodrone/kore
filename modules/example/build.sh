@@ -68,6 +68,7 @@ for src in `find ${SOURCE_DIR} -type f -name \*.c`; do
 	fi
 done
 
+LDFLAGS+=" -L/opt/local/lib -L${KORE_DIR} -lkore -rdynamic -lssl -lcrypto -lz"
 ${CC} ${LDFLAGS} `find .objs -name \*.o -type f` -o ${MODULE}
 echo "Building completed!"
 
