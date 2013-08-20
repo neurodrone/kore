@@ -16,10 +16,13 @@
 
 #include <sys/param.h>
 
+#include <ctype.h>
+
 #include "spdy.h"
 #include "kore.h"
 #include "http.h"
 
+static char		*http_status_text(int);
 static int		http_post_data_recv(struct netbuf *);
 static int		http_send_done(struct netbuf *);
 
@@ -64,6 +67,7 @@ http_request_new(struct connection *c, struct spdy_stream *s, char *host,
 	req->status = 0;
 	req->stream = s;
 	req->post_data = NULL;
+	req->hdlr_extra = NULL;
 	kore_strlcpy(req->host, host, sizeof(req->host));
 	kore_strlcpy(req->path, path, sizeof(req->path));
 
@@ -202,6 +206,8 @@ http_request_free(struct http_request *req)
 
 	if (req->agent != NULL)
 		kore_mem_free(req->agent);
+	if (req->hdlr_extra != NULL)
+		kore_mem_free(req->hdlr_extra);
 
 	kore_pool_put(&http_request_pool, req);
 }
@@ -221,7 +227,8 @@ http_response(struct http_request *req, int status, u_int8_t *d, u_int32_t len)
 
 	req->status = status;
 	if (req->owner->proto == CONN_PROTO_SPDY) {
-		snprintf(sbuf, sizeof(sbuf), "%d", status);
+		snprintf(sbuf, sizeof(sbuf),
+		    "%d %s", status, http_status_text(status));
 
 		hblock = spdy_header_block_create(SPDY_HBLOCK_NORMAL);
 		spdy_header_block_add(hblock, ":status", sbuf);
@@ -255,7 +262,8 @@ http_response(struct http_request *req, int status, u_int8_t *d, u_int32_t len)
 	} else {
 		buf = kore_buf_create(KORE_BUF_INITIAL);
 
-		kore_buf_appendf(buf, "HTTP/1.1 %d\r\n", status);
+		kore_buf_appendf(buf, "HTTP/1.1 %d %s\r\n",
+		    status, http_status_text(status));
 		kore_buf_appendf(buf, "Content-length: %d\r\n", len);
 		kore_buf_appendf(buf, "Connection: keep-alive\r\n");
 		kore_buf_appendf(buf, "Keep-Alive: timeout=20\r\n");
@@ -401,7 +409,7 @@ http_header_recv(struct netbuf *nb)
 			return (KORE_RESULT_ERROR);
 		}
 
-		clen = kore_strtonum(p, 0, UINT_MAX, &v);
+		clen = kore_strtonum(p, 10, 0, UINT_MAX, &v);
 		if (v == KORE_RESULT_ERROR) {
 			kore_mem_free(p);
 			kore_debug("content-length invalid: %s", p);
@@ -486,19 +494,69 @@ http_argument_lookup(struct http_request *req, const char *name, char **out)
 }
 
 int
+http_argument_urldecode(char *arg)
+{
+	u_int8_t	v;
+	int		err;
+	size_t		len;
+	char		*p, *in, h[5];
+
+	p = arg;
+	in = arg;
+	len = strlen(arg);
+
+	while (*p != '\0' && p < (arg + len)) {
+		if (*p == '+')
+			*p = ' ';
+		if (*p != '%') {
+			*in++ = *p++;
+			continue;
+		}
+
+		if ((p + 2) >= (arg + len)) {
+			kore_debug("overflow in '%s'", arg);
+			return (KORE_RESULT_ERROR);
+		}
+
+		if (!isxdigit(*(p + 1)) || !isxdigit(*(p + 2))) {
+			*in++ = *p++;
+			continue;
+		}
+
+		h[0] = '0';
+		h[1] = 'x';
+		h[2] = *(p + 1);
+		h[3] = *(p + 2);
+		h[4] = '\0';
+
+		v = kore_strtonum(h, 16, 32, 127, &err);
+		if (err != KORE_RESULT_OK)
+			return (err);
+
+		*in++ = (char)v;
+		p += 3;
+	}
+
+	*in = '\0';
+	return (KORE_RESULT_OK);
+}
+
+int
 http_argument_multiple_lookup(struct http_request *req, struct http_arg *args)
 {
-	int		i;
+	int		i, c;
 
+	c = 0;
 	for (i = 0; args[i].name != NULL; i++) {
 		if (!http_argument_lookup(req,
 		    args[i].name, &(args[i].value))) {
 			args[i].value = NULL;
-			return (i);
+		} else {
+			c++;
 		}
 	}
 
-	return (i);
+	return (c);
 }
 
 void
@@ -560,4 +618,138 @@ http_send_done(struct netbuf *nb)
 	    NETBUF_CALL_CB_ALWAYS, NULL, http_header_recv);
 
 	return (KORE_RESULT_OK);
+}
+
+static char *
+http_status_text(int status)
+{
+	char		*r;
+
+	switch (status) {
+	case HTTP_STATUS_CONTINUE:
+		r = "Continue";
+		break;
+	case HTTP_STATUS_SWITCHING_PROTOCOLS:
+		r = "Switching Protocols";
+		break;
+	case HTTP_STATUS_OK:
+		r = "OK";
+		break;
+	case HTTP_STATUS_CREATED:
+		r = "Created";
+		break;
+	case HTTP_STATUS_ACCEPTED:
+		r = "Accepted";
+		break;
+	case HTTP_STATUS_NON_AUTHORITATIVE:
+		r = "Non-Authoritative Information";
+		break;
+	case HTTP_STATUS_NO_CONTENT:
+		r = "No Content";
+		break;
+	case HTTP_STATUS_RESET_CONTENT:
+		r = "Reset Content";
+		break;
+	case HTTP_STATUS_PARTIAL_CONTENT:
+		r = "Partial Content";
+		break;
+	case HTTP_STATUS_MULTIPLE_CHOICES:
+		r = "Multiple Choices";
+		break;
+	case HTTP_STATUS_MOVED_PERMANENTLY:
+		r = "Moved Permanently";
+		break;
+	case HTTP_STATUS_FOUND:
+		r = "Found";
+		break;
+	case HTTP_STATUS_SEE_OTHER:
+		r = "See Other";
+		break;
+	case HTTP_STATUS_NOT_MODIFIED:
+		r = "Not Modified";
+		break;
+	case HTTP_STATUS_USE_PROXY:
+		r = "Use Proxy";
+		break;
+	case HTTP_STATUS_TEMPORARY_REDIRECT:
+		r = "Temporary Redirect";
+		break;
+	case HTTP_STATUS_BAD_REQUEST:
+		r = "Bad Request";
+		break;
+	case HTTP_STATUS_UNAUTHORIZED:
+		r = "Unauthorized";
+		break;
+	case HTTP_STATUS_PAYMENT_REQUIRED:
+		r = "Payment Required";
+		break;
+	case HTTP_STATUS_FORBIDDEN:
+		r = "Forbidden";
+		break;
+	case HTTP_STATUS_NOT_FOUND:
+		r = "Not Found";
+		break;
+	case HTTP_STATUS_METHOD_NOT_ALLOWED:
+		r = "Method Not Allowed";
+		break;
+	case HTTP_STATUS_NOT_ACCEPTABLE:
+		r = "Not Acceptable";
+		break;
+	case HTTP_STATUS_PROXY_AUTH_REQUIRED:
+		r = "Proxy Authentication Required";
+		break;
+	case HTTP_STATUS_REQUEST_TIMEOUT:
+		r = "Request Time-out";
+		break;
+	case HTTP_STATUS_CONFLICT:
+		r = "Conflict";
+		break;
+	case HTTP_STATUS_GONE:
+		r = "Gone";
+		break;
+	case HTTP_STATUS_LENGTH_REQUIRED:
+		r = "Length Required";
+		break;
+	case HTTP_STATUS_PRECONDITION_FAILED:
+		r = "Precondition Failed";
+		break;
+	case HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE:
+		r = "Request Entity Too Large";
+		break;
+	case HTTP_STATUS_REQUEST_URI_TOO_LARGE:
+		r = "Request-URI Too Large";
+		break;
+	case HTTP_STATUS_UNSUPPORTED_MEDIA_TYPE:
+		r = "Unsupported Media Type";
+		break;
+	case HTTP_STATUS_REQUEST_RANGE_INVALID:
+		r = "Requested range not satisfiable";
+		break;
+	case HTTP_STATUS_EXPECTATION_FAILED:
+		r = "Expectation Failed";
+		break;
+	case HTTP_STATUS_INTERNAL_ERROR:
+		r = "Internal Server Error";
+		break;
+	case HTTP_STATUS_NOT_IMPLEMENTED:
+		r = "Not Implemented";
+		break;
+	case HTTP_STATUS_BAD_GATEWAY:
+		r = "Bad Gateway";
+		break;
+	case HTTP_STATUS_SERVICE_UNAVAILABLE:
+		r = "Service Unavailable";
+		break;
+	case HTTP_STATUS_GATEWAY_TIMEOUT:
+		r = "Gateway Time-out";
+		break;
+	case HTTP_STATUS_BAD_VERSION:
+		r = "HTTP Version not supported";
+		break;
+	default:
+		r = "";
+		break;
+	}
+
+	return (r);
 }

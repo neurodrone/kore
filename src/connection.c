@@ -68,6 +68,7 @@ kore_connection_accept(struct listener *l, struct connection **out)
 	c->owner = l;
 	c->ssl = NULL;
 	c->flags = 0;
+	c->hdlr_extra = NULL;
 	c->inflate_started = 0;
 	c->deflate_started = 0;
 	c->client_stream_id = 0;
@@ -199,6 +200,9 @@ kore_connection_remove(struct connection *c)
 	if (c->ssl != NULL)
 		SSL_free(c->ssl);
 	close(c->fd);
+
+	if (c->hdlr_extra != NULL)
+		kore_mem_free(c->hdlr_extra);
 
 	if (c->inflate_started)
 		inflateEnd(&(c->z_inflate));
